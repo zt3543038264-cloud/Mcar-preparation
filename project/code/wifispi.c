@@ -13,6 +13,8 @@
 #include "Motor.h"
 #include "app_navigation.h"
 #include "app_control.h"
+#include "PID_config.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #endif
@@ -106,6 +108,43 @@ static uint8_t g_channels[VOFA_MAX_CHANNELS];
 static char g_command[1024];
 static size_t g_command_length;
 static int g_command_discard;
+static int g_slider_receiving;
+
+/* A slider names one public parameter, never an address. Add mappings here
+ * when another application variable should be editable from the host. */
+typedef struct {
+    const char *name;
+    volatile float *value;
+    float minimum, maximum;
+    int needs_stop;
+    tagPID_T *pid;
+    PIDInitStruct *pid_init;
+} slider_parameter_t;
+#define SLIDER(name, address, low, high, stop) {name, address, low, high, stop, NULL, NULL}
+#define SLIDER_PID(name, wheel, term) \
+    {name, &wheel##PidInitStruct.term, 0, 1000, 0, &wheel##pid, &wheel##PidInitStruct}
+static const slider_parameter_t g_slider_parameters[] = {
+    SLIDER("scale_x", &navigation_scale_x, 0.01f, 10, 1),
+    SLIDER("scale_y", &navigation_scale_y, 0.01f, 10, 1),
+    SLIDER("pos_xy_kp", &motor_position_config.xy_kp, 0.01f, 20, 0),
+    SLIDER("pos_xy_kd", &motor_position_config.xy_kd, 0, 5, 0),
+    SLIDER("pos_yaw_kp", &motor_position_config.yaw_kp, 0.01f, 20, 0),
+    SLIDER("pos_max_speed_cmps", &motor_position_config.max_speed_cmps, 1, 100, 0),
+    SLIDER("pos_max_omega_radps", &motor_position_config.max_omega_radps, 0.05f, 3, 0),
+    SLIDER("pos_max_accel_cmps2", &motor_position_config.max_accel_cmps2, 1, 300, 0),
+    SLIDER("pos_max_alpha_radps2", &motor_position_config.max_alpha_radps2, 0.05f, 10, 0),
+    SLIDER("pos_xy_tolerance_cm", &motor_position_config.xy_tolerance_cm, 0.5f, 20, 0),
+    SLIDER("pos_yaw_tolerance_deg", &motor_position_config.yaw_tolerance_deg, 0.5f, 20, 0),
+    SLIDER("goal_x_cm", &motor_position_goal.x_cm, -10000, 10000, 1),
+    SLIDER("goal_y_cm", &motor_position_goal.y_cm, -10000, 10000, 1),
+    SLIDER("goal_yaw_deg", &motor_position_goal.yaw_deg, -180, 180, 1),
+    SLIDER_PID("ul_kp", UL, fKp), SLIDER_PID("ul_ki", UL, fKi), SLIDER_PID("ul_kd", UL, fKd),
+    SLIDER_PID("ur_kp", UR, fKp), SLIDER_PID("ur_ki", UR, fKi), SLIDER_PID("ur_kd", UR, fKd),
+    SLIDER_PID("dl_kp", DL, fKp), SLIDER_PID("dl_ki", DL, fKi), SLIDER_PID("dl_kd", DL, fKd),
+    SLIDER_PID("dr_kp", DR, fKp), SLIDER_PID("dr_ki", DR, fKi), SLIDER_PID("dr_kd", DR, fKd)
+};
+#undef SLIDER
+#undef SLIDER_PID
 
 static void telemetry_reset(void)
 {
@@ -115,6 +154,7 @@ static void telemetry_reset(void)
     wifi_telemetry_stream_enabled=1;
     wifi_telemetry_commands=wifi_telemetry_command_errors=0;
     g_command_length=0; g_command_discard=0;
+    g_slider_receiving=0;
 }
 
 static void send_reply(const char *text)
@@ -137,6 +177,90 @@ static char *trim(char *text)
     while (end>text && (end[-1]==' ' || end[-1]=='\t')) --end;
     *end='\0';
     return text;
+}
+static char *slider_token(char *text)
+{
+    size_t length;
+    text=trim(text); length=strlen(text);
+    if (length>=2 && text[0]=='"' && text[length-1]=='"') {
+        text[length-1]='\0'; ++text;
+    }
+    if (*text=='\0' || strchr(text,'"')!=NULL) return NULL;
+    return text;
+}
+/* Decimal number, optionally signed and with exponent; not a general JSON
+ * parser. Strings/escapes, extra fields, NaN/Inf and hex numbers are rejected. */
+static int slider_number(const char *text, float *out)
+{
+    const char *p=text;
+    char *end;
+    if (*p=='-' || *p=='+') ++p;
+    if (*p<'0' || *p>'9') return 0;
+    while (*p>='0' && *p<='9') ++p;
+    if (*p=='.') {
+        ++p;
+        if (*p<'0' || *p>'9') return 0;
+        while (*p>='0' && *p<='9') ++p;
+    }
+    if (*p=='e' || *p=='E') {
+        ++p;
+        if (*p=='+' || *p=='-') ++p;
+        if (*p<'0' || *p>'9') return 0;
+        while (*p>='0' && *p<='9') ++p;
+    }
+    if (*p!='\0') return 0;
+    *out=strtof(text,&end);
+    return *end=='\0' && isfinite(*out);
+}
+static void process_slider(char *command)
+{
+    char *kind, *name, *number, *comma;
+    size_t length=strlen(command), i;
+    float value;
+    const slider_parameter_t *parameter=NULL;
+    uint32 primask;
+    char reply[96];
+    if (length<2 || command[length-1]!=']') goto bad_packet;
+    command[length-1]='\0'; kind=command+1;
+    comma=strchr(kind,',');
+    if (comma==NULL) goto bad_packet;
+    *comma='\0'; name=comma+1;
+    comma=strchr(name,',');
+    if (comma==NULL) goto bad_packet;
+    *comma='\0'; number=trim(comma+1);
+    kind=slider_token(kind); name=slider_token(name);
+    if (kind==NULL || name==NULL || !slider_number(number,&value)) goto bad_packet;
+    if (strcmp(kind,"slider")!=0) { command_error("unknown control type"); return; }
+    for (i=0;i<sizeof(g_slider_parameters)/sizeof(g_slider_parameters[0]);++i) {
+        if (strcmp(name,g_slider_parameters[i].name)==0) { parameter=&g_slider_parameters[i]; break; }
+    }
+    if (parameter==NULL) { command_error("unknown parameter"); return; }
+    if (value<parameter->minimum || value>parameter->maximum) {
+        command_error("parameter out of range"); return;
+    }
+    primask=interrupt_global_disable();
+    if (parameter->needs_stop && motor_run_enabled) {
+        interrupt_global_enable(primask);
+        command_error("parameter requires Run off"); return;
+    }
+    {
+        int changed=(*parameter->value!=value);
+        *parameter->value=value;
+        if (parameter->pid!=NULL && (changed ||
+            parameter->pid->fKp!=parameter->pid_init->fKp ||
+            parameter->pid->fKi!=parameter->pid_init->fKi ||
+            parameter->pid->fKd!=parameter->pid_init->fKd)) {
+            PID_Update(parameter->pid,parameter->pid_init);
+            PID_Clear(parameter->pid);
+        }
+    }
+    value=*parameter->value;
+    interrupt_global_enable(primask);
+    (void)snprintf(reply,sizeof(reply),"MCAR SLIDER %s %.9g\n",name,(double)value);
+    send_reply(reply);
+    return;
+bad_packet:
+    command_error("expected [slider,parameter,number]");
 }
 static void reply_names(int all)
 {
@@ -164,6 +288,7 @@ static void process_command(char *line)
     unsigned long number;
     char reply[80];
     ++wifi_telemetry_commands;
+    if (*command=='[') { process_slider(command); return; }
     if (strcmp(command,"LIST?")==0) { reply_names(1); return; }
     if (strcmp(command,"GET?")==0) {
         reply_names(0);
@@ -213,7 +338,14 @@ static void receive_commands(void)
     uint32 i, count=wifi_spi_read_buffer(bytes,sizeof(bytes));
     for (i=0;i<count;++i) {
         uint8_t ch=bytes[i];
-        if (ch=='\n') {
+        if (ch=='[' && !g_slider_receiving && !g_command_discard) {
+            g_command_length=0; g_slider_receiving=1;
+        }
+        if (ch=='\n' || (g_slider_receiving && ch==']')) {
+            if (ch==']' && !g_command_discard) {
+                if (g_command_length==sizeof(g_command)-1) g_command_discard=1;
+                else g_command[g_command_length++]=(char)ch;
+            }
             if (g_command_discard) {
                 ++wifi_telemetry_commands;
                 command_error("invalid or oversized line");
@@ -221,7 +353,7 @@ static void receive_commands(void)
             else if (g_command_length!=0) {
                 g_command[g_command_length]='\0'; process_command(g_command);
             }
-            g_command_length=0; g_command_discard=0;
+            g_command_length=0; g_command_discard=0; g_slider_receiving=0;
         } else if (ch=='\r') {
             /* Accept both LF and CRLF from the existing host text sender. */
         } else if (g_command_discard) {

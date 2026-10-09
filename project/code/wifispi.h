@@ -29,7 +29,8 @@ int wifispi_send_floats(const float *channels,size_t count); /* 1=成功 */
 /* IMU 三通道专用接口；实际发送 16 字节 JustFloat，不是旧 12 字节包。 */
 int wifispi_send_imu(const float angles_deg[3]);
 void wifispi_telemetry_init(void);
-void wifispi_telemetry_service(void); /* 主循环；SUB/RATE/STREAM/LIST?/GET? */
+/* 主循环；遥测配置 + [slider,参数名,数值]，也接受 JSON 引号。 */
+void wifispi_telemetry_service(void);
 
 /* 至少一个通道；表达式只求值一次，整数自动转 float。不得在中断中发送。 */
 #define wifi_justfloat(...) \
