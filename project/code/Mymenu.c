@@ -84,11 +84,19 @@ static void menu_create(void)
     Create_Menu_File_dynamic(position, "MaxOmega", (void *)&motor_position_config.max_omega_radps, float_Box);
     Create_Menu_File_dynamic(position, "TolXY_cm", (void *)&motor_position_config.xy_tolerance_cm, float_Box);
     Create_Menu_File_dynamic(position, "TolYaw_deg", (void *)&motor_position_config.yaw_tolerance_deg, float_Box);
-    Create_Menu_File_dynamic(position, "XY_Kp", (void *)&motor_position_config.xy_kp, float_Box);
-    Create_Menu_File_dynamic(position, "XY_Kd", (void *)&motor_position_config.xy_kd, float_Box);
-    Create_Menu_File_dynamic(position, "Yaw_Kp", (void *)&motor_position_config.yaw_kp, float_Box);
     Create_Menu_File_dynamic(position, "Acc_cmps2", (void *)&motor_position_config.max_accel_cmps2, float_Box);
     Create_Menu_File_dynamic(position, "Alpha", (void *)&motor_position_config.max_alpha_radps2, float_Box);
+    /* ivision 式开环规划参数（替代原 XY_Kp/XY_Kd/Yaw_Kp，后三者已不参与控制） */
+    Create_Menu_File_dynamic(position, "BrakeLim", (void *)&motor_position_config.brake_limit, float_Box);
+    Create_Menu_File_dynamic(position, "BrakeCap", (void *)&motor_position_config.brake_ceiling_cmps2, float_Box);
+    Create_Menu_File_dynamic(position, "ShortSeg", (void *)&motor_position_config.short_segment_cm, float_Box);
+    Create_Menu_File_dynamic(position, "ShortBst", (void *)&motor_position_config.short_boost_gain, float_Box);
+    Create_Menu_File_dynamic(position, "AppZone", (void *)&motor_position_config.approach_zone_cm, float_Box);
+    Create_Menu_File_dynamic(position, "AppRatio", (void *)&motor_position_config.approach_ratio, float_Box);
+    Create_Menu_File_dynamic(position, "AppAccK", (void *)&motor_position_config.approach_acc_k, float_Box);
+    Create_Menu_File_dynamic(position, "YawBand", (void *)&motor_position_config.yaw_lin_band_rad, float_Box);
+    Create_Menu_File_dynamic(position, "YawKd", (void *)&motor_position_config.yaw_kd, float_Box);
+    Create_Menu_File_dynamic(position, "YawTrKd", (void *)&motor_position_config.yaw_kd_translate, float_Box);
     Create_Menu_Readonly_dynamic(position, "ErrXY_cm", &g_position_snapshot.distance_cm, float_Box);
     Create_Menu_Readonly_dynamic(position, "ErrYaw_deg", &g_position_snapshot.yaw_error_deg, float_Box);
 
@@ -325,7 +333,7 @@ static void menu_adjust(int direction)
         else if (g_pointer->data == (void *)&motor_position_config.xy_kd)
             value = menu_clamp(value, 0.0f, 5.0f);
         else if (g_pointer->data == (void *)&motor_position_config.max_speed_cmps)
-            value = menu_clamp(value, 1.0f, 100.0f);
+            value = menu_clamp(value, 1.0f, 500.0f);
         else if (g_pointer->data == (void *)&motor_position_config.max_omega_radps)
             value = menu_clamp(value, 0.05f, 3.0f);
         else if (g_pointer->data == (void *)&motor_position_config.max_accel_cmps2)
@@ -335,6 +343,25 @@ static void menu_adjust(int direction)
         else if (g_pointer->data == (void *)&motor_position_config.xy_tolerance_cm ||
                  g_pointer->data == (void *)&motor_position_config.yaw_tolerance_deg)
             value = menu_clamp(value, 0.5f, 20.0f);
+        else if (g_pointer->data == (void *)&motor_position_config.brake_limit)
+            value = menu_clamp(value, 0.05f, 2.0f);
+        else if (g_pointer->data == (void *)&motor_position_config.brake_ceiling_cmps2)
+            value = menu_clamp(value, 50.0f, 5000.0f);
+        else if (g_pointer->data == (void *)&motor_position_config.short_segment_cm)
+            value = menu_clamp(value, 1.0f, 200.0f);
+        else if (g_pointer->data == (void *)&motor_position_config.short_boost_gain)
+            value = menu_clamp(value, 1.0f, 3.0f);
+        else if (g_pointer->data == (void *)&motor_position_config.approach_zone_cm)
+            value = menu_clamp(value, 0.0f, 50.0f);
+        else if (g_pointer->data == (void *)&motor_position_config.approach_ratio)
+            value = menu_clamp(value, 0.0f, 1.0f);
+        else if (g_pointer->data == (void *)&motor_position_config.approach_acc_k)
+            value = menu_clamp(value, 0.05f, 0.95f);
+        else if (g_pointer->data == (void *)&motor_position_config.yaw_lin_band_rad)
+            value = menu_clamp(value, 0.02f, 1.0f);
+        else if (g_pointer->data == (void *)&motor_position_config.yaw_kd ||
+                 g_pointer->data == (void *)&motor_position_config.yaw_kd_translate)
+            value = menu_clamp(value, 0.0f, 2.0f);
         else if (g_pointer->data == (void *)&motor_cmd_vx_cmps ||
             g_pointer->data == (void *)&motor_cmd_vy_cmps)
         {

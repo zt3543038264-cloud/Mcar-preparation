@@ -7,10 +7,13 @@
 
 #include <string.h>
 
-/* v2 adds the route. v1 keeps PID/navigation and uses default nodes.
- * Run and runtime state are never persisted. Unknown versions are rejected. */
+/* v3 adds the ivision-style position planner parameters. v2 has the route,
+ * v1 keeps PID/navigation and uses default nodes; both load with planner
+ * defaults. Run and runtime state are never persisted. Unknown versions
+ * are rejected. */
 #define MENU_FLASH_MAGIC 0x4D454E55U
-#define MENU_FLASH_VERSION 2U
+#define MENU_FLASH_VERSION 3U
+#define MENU_FLASH_VERSION_V2 2U
 #define MENU_FLASH_LEGACY_VERSION 1U
 #define MENU_FLASH_CHECK_XOR 0xA5A55A5AU
 
@@ -35,7 +38,21 @@
 #define MENU_FLASH_LEGACY_CHECKSUM 27U
 #define MENU_FLASH_WORD_ROUTE_COUNT 27U
 #define MENU_FLASH_WORD_ROUTE_FIRST 28U
-#define MENU_FLASH_WORD_CHECKSUM (MENU_FLASH_WORD_ROUTE_FIRST + 3U * ROUTE_MAX_NODES)
+#define MENU_FLASH_WORD_CHECKSUM_V2 (MENU_FLASH_WORD_ROUTE_FIRST + 3U * ROUTE_MAX_NODES)
+#define MENU_FLASH_WORD_COUNT_V2 (MENU_FLASH_WORD_CHECKSUM_V2 + 1U)
+/* v3：路线块之后追加 10 个规划参数字，校验字后移 */
+#define MENU_FLASH_WORD_PLANNER_FIRST MENU_FLASH_WORD_CHECKSUM_V2
+#define MENU_FLASH_WORD_BRAKE_LIMIT (MENU_FLASH_WORD_PLANNER_FIRST + 0U)
+#define MENU_FLASH_WORD_BRAKE_CEILING (MENU_FLASH_WORD_PLANNER_FIRST + 1U)
+#define MENU_FLASH_WORD_SHORT_SEGMENT (MENU_FLASH_WORD_PLANNER_FIRST + 2U)
+#define MENU_FLASH_WORD_SHORT_BOOST (MENU_FLASH_WORD_PLANNER_FIRST + 3U)
+#define MENU_FLASH_WORD_APP_ZONE (MENU_FLASH_WORD_PLANNER_FIRST + 4U)
+#define MENU_FLASH_WORD_APP_RATIO (MENU_FLASH_WORD_PLANNER_FIRST + 5U)
+#define MENU_FLASH_WORD_APP_ACC_K (MENU_FLASH_WORD_PLANNER_FIRST + 6U)
+#define MENU_FLASH_WORD_YAW_BAND (MENU_FLASH_WORD_PLANNER_FIRST + 7U)
+#define MENU_FLASH_WORD_YAW_KD (MENU_FLASH_WORD_PLANNER_FIRST + 8U)
+#define MENU_FLASH_WORD_YAW_KD_TRN (MENU_FLASH_WORD_PLANNER_FIRST + 9U)
+#define MENU_FLASH_WORD_CHECKSUM (MENU_FLASH_WORD_PLANNER_FIRST + 10U)
 #define MENU_FLASH_WORD_COUNT (MENU_FLASH_WORD_CHECKSUM + 1U)
 
 #define MENU_FLAG_YAW_REVERSED (1UL << 0)
@@ -54,13 +71,17 @@ static float menu_flash_word_to_float(uint32 word)
     return value;
 }
 
-/* 校验字在缓冲区内计算，保存前和读回后各调用一次 */
+/* 校验字在缓冲区内计算，保存前和读回后各调用一次；范围随版本不同 */
 static uint32 menu_flash_checksum(void)
 {
     uint32 version = flash_union_buffer[MENU_FLASH_WORD_VERSION].uint32_type;
-    uint32 end = version == MENU_FLASH_LEGACY_VERSION ? MENU_FLASH_LEGACY_CHECKSUM : MENU_FLASH_WORD_CHECKSUM;
+    uint32 end;
     uint32 checksum = MENU_FLASH_MAGIC ^ version ^ MENU_FLASH_CHECK_XOR;
     uint32 index;
+
+    if (version == MENU_FLASH_LEGACY_VERSION) end = MENU_FLASH_LEGACY_CHECKSUM;
+    else if (version == MENU_FLASH_VERSION_V2) end = MENU_FLASH_WORD_CHECKSUM_V2;
+    else end = MENU_FLASH_WORD_CHECKSUM;
 
     for (index = MENU_FLASH_WORD_KP_FIRST; index < end; index++)
     {
@@ -72,9 +93,14 @@ static uint32 menu_flash_checksum(void)
 static uint8 menu_flash_buffer_valid(void)
 {
     uint32 version = flash_union_buffer[MENU_FLASH_WORD_VERSION].uint32_type;
-    uint32 check = version == MENU_FLASH_LEGACY_VERSION ? MENU_FLASH_LEGACY_CHECKSUM : MENU_FLASH_WORD_CHECKSUM;
+    uint32 check;
+
+    if (version == MENU_FLASH_LEGACY_VERSION) check = MENU_FLASH_LEGACY_CHECKSUM;
+    else if (version == MENU_FLASH_VERSION_V2) check = MENU_FLASH_WORD_CHECKSUM_V2;
+    else check = MENU_FLASH_WORD_CHECKSUM;
     return (flash_union_buffer[MENU_FLASH_WORD_MAGIC].uint32_type == MENU_FLASH_MAGIC &&
-            (version == MENU_FLASH_VERSION || version == MENU_FLASH_LEGACY_VERSION) &&
+            (version == MENU_FLASH_VERSION || version == MENU_FLASH_VERSION_V2 ||
+             version == MENU_FLASH_LEGACY_VERSION) &&
             flash_union_buffer[check].uint32_type == menu_flash_checksum()) ? 1U : 0U;
 }
 
@@ -103,6 +129,26 @@ static uint8 menu_flash_config_valid(const menu_flash_config_t *config)
     if (!menu_flash_float_valid(config->max_alpha_radps2) || config->max_alpha_radps2 <= 0.0f) return 0U;
     if (!menu_flash_float_valid(config->xy_tolerance_cm) || config->xy_tolerance_cm <= 0.0f) return 0U;
     if (!menu_flash_float_valid(config->yaw_tolerance_deg) || config->yaw_tolerance_deg <= 0.0f) return 0U;
+    if (!menu_flash_float_valid(config->brake_limit) ||
+        config->brake_limit < 0.05f || config->brake_limit > 2.0f) return 0U;
+    if (!menu_flash_float_valid(config->brake_ceiling_cmps2) ||
+        config->brake_ceiling_cmps2 < 50.0f || config->brake_ceiling_cmps2 > 5000.0f) return 0U;
+    if (!menu_flash_float_valid(config->short_segment_cm) ||
+        config->short_segment_cm < 1.0f || config->short_segment_cm > 200.0f) return 0U;
+    if (!menu_flash_float_valid(config->short_boost_gain) ||
+        config->short_boost_gain < 1.0f || config->short_boost_gain > 3.0f) return 0U;
+    if (!menu_flash_float_valid(config->approach_zone_cm) ||
+        config->approach_zone_cm < 0.0f || config->approach_zone_cm > 50.0f) return 0U;
+    if (!menu_flash_float_valid(config->approach_ratio) ||
+        config->approach_ratio < 0.0f || config->approach_ratio > 1.0f) return 0U;
+    if (!menu_flash_float_valid(config->approach_acc_k) ||
+        config->approach_acc_k < 0.05f || config->approach_acc_k > 0.95f) return 0U;
+    if (!menu_flash_float_valid(config->yaw_lin_band_rad) ||
+        config->yaw_lin_band_rad < 0.02f || config->yaw_lin_band_rad > 1.0f) return 0U;
+    if (!menu_flash_float_valid(config->yaw_kd) ||
+        config->yaw_kd < 0.0f || config->yaw_kd > 2.0f) return 0U;
+    if (!menu_flash_float_valid(config->yaw_kd_translate) ||
+        config->yaw_kd_translate < 0.0f || config->yaw_kd_translate > 2.0f) return 0U;
     if (!menu_flash_float_valid(config->mount_deg) ||
         config->mount_deg < -180.0f || config->mount_deg > 180.0f) return 0U;
     if (!menu_flash_float_valid(config->scale_x) ||
@@ -161,6 +207,16 @@ uint8 Data_save_to_flash(const menu_flash_config_t *config)
         flash_union_buffer[first + 1U].uint32_type = menu_flash_float_to_word(config->route_nodes[wheel].y_cm);
         flash_union_buffer[first + 2U].uint32_type = menu_flash_float_to_word(config->route_nodes[wheel].yaw_deg);
     }
+    flash_union_buffer[MENU_FLASH_WORD_BRAKE_LIMIT].uint32_type = menu_flash_float_to_word(config->brake_limit);
+    flash_union_buffer[MENU_FLASH_WORD_BRAKE_CEILING].uint32_type = menu_flash_float_to_word(config->brake_ceiling_cmps2);
+    flash_union_buffer[MENU_FLASH_WORD_SHORT_SEGMENT].uint32_type = menu_flash_float_to_word(config->short_segment_cm);
+    flash_union_buffer[MENU_FLASH_WORD_SHORT_BOOST].uint32_type = menu_flash_float_to_word(config->short_boost_gain);
+    flash_union_buffer[MENU_FLASH_WORD_APP_ZONE].uint32_type = menu_flash_float_to_word(config->approach_zone_cm);
+    flash_union_buffer[MENU_FLASH_WORD_APP_RATIO].uint32_type = menu_flash_float_to_word(config->approach_ratio);
+    flash_union_buffer[MENU_FLASH_WORD_APP_ACC_K].uint32_type = menu_flash_float_to_word(config->approach_acc_k);
+    flash_union_buffer[MENU_FLASH_WORD_YAW_BAND].uint32_type = menu_flash_float_to_word(config->yaw_lin_band_rad);
+    flash_union_buffer[MENU_FLASH_WORD_YAW_KD].uint32_type = menu_flash_float_to_word(config->yaw_kd);
+    flash_union_buffer[MENU_FLASH_WORD_YAW_KD_TRN].uint32_type = menu_flash_float_to_word(config->yaw_kd_translate);
     flash_union_buffer[MENU_FLASH_WORD_CHECKSUM].uint32_type = menu_flash_checksum();
 
     if (flash_check(FLASH_SECTION_INDEX, FLASH_PAGE_INDEX) &&
@@ -237,6 +293,34 @@ uint8 Data_load_from_flash(menu_flash_config_t *config)
             loaded.route_nodes[wheel].yaw_deg = menu_flash_word_to_float(flash_union_buffer[first + 2U].uint32_type);
         }
     }
+    if (flash_union_buffer[MENU_FLASH_WORD_VERSION].uint32_type == MENU_FLASH_VERSION)
+    {
+        loaded.brake_limit = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_BRAKE_LIMIT].uint32_type);
+        loaded.brake_ceiling_cmps2 = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_BRAKE_CEILING].uint32_type);
+        loaded.short_segment_cm = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_SHORT_SEGMENT].uint32_type);
+        loaded.short_boost_gain = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_SHORT_BOOST].uint32_type);
+        loaded.approach_zone_cm = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_APP_ZONE].uint32_type);
+        loaded.approach_ratio = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_APP_RATIO].uint32_type);
+        loaded.approach_acc_k = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_APP_ACC_K].uint32_type);
+        loaded.yaw_lin_band_rad = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_YAW_BAND].uint32_type);
+        loaded.yaw_kd = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_YAW_KD].uint32_type);
+        loaded.yaw_kd_translate = menu_flash_word_to_float(flash_union_buffer[MENU_FLASH_WORD_YAW_KD_TRN].uint32_type);
+    }
+    else
+    {
+        /* v1/v2 旧存档：规划参数取编译期默认值 */
+        static const position_config_t pos_defaults = POSITION_CONFIG_DEFAULT;
+        loaded.brake_limit = pos_defaults.brake_limit;
+        loaded.brake_ceiling_cmps2 = pos_defaults.brake_ceiling_cmps2;
+        loaded.short_segment_cm = pos_defaults.short_segment_cm;
+        loaded.short_boost_gain = pos_defaults.short_boost_gain;
+        loaded.approach_zone_cm = pos_defaults.approach_zone_cm;
+        loaded.approach_ratio = pos_defaults.approach_ratio;
+        loaded.approach_acc_k = pos_defaults.approach_acc_k;
+        loaded.yaw_lin_band_rad = pos_defaults.yaw_lin_band_rad;
+        loaded.yaw_kd = pos_defaults.yaw_kd;
+        loaded.yaw_kd_translate = pos_defaults.yaw_kd_translate;
+    }
     if (!menu_flash_config_valid(&loaded)) return 0U;
     *config = loaded;
     return 1U;
@@ -273,6 +357,16 @@ uint8 menu_flash_save_current(void)
     config.max_alpha_radps2 = motor_position_config.max_alpha_radps2;
     config.xy_tolerance_cm = motor_position_config.xy_tolerance_cm;
     config.yaw_tolerance_deg = motor_position_config.yaw_tolerance_deg;
+    config.brake_limit = motor_position_config.brake_limit;
+    config.brake_ceiling_cmps2 = motor_position_config.brake_ceiling_cmps2;
+    config.short_segment_cm = motor_position_config.short_segment_cm;
+    config.short_boost_gain = motor_position_config.short_boost_gain;
+    config.approach_zone_cm = motor_position_config.approach_zone_cm;
+    config.approach_ratio = motor_position_config.approach_ratio;
+    config.approach_acc_k = motor_position_config.approach_acc_k;
+    config.yaw_lin_band_rad = motor_position_config.yaw_lin_band_rad;
+    config.yaw_kd = motor_position_config.yaw_kd;
+    config.yaw_kd_translate = motor_position_config.yaw_kd_translate;
     config.mount_deg = navigation_mount_deg;
     config.scale_x = navigation_scale_x;
     config.scale_y = navigation_scale_y;
@@ -319,6 +413,16 @@ uint8 menu_flash_load_current(void)
     motor_position_config.max_alpha_radps2 = config.max_alpha_radps2;
     motor_position_config.xy_tolerance_cm = config.xy_tolerance_cm;
     motor_position_config.yaw_tolerance_deg = config.yaw_tolerance_deg;
+    motor_position_config.brake_limit = config.brake_limit;
+    motor_position_config.brake_ceiling_cmps2 = config.brake_ceiling_cmps2;
+    motor_position_config.short_segment_cm = config.short_segment_cm;
+    motor_position_config.short_boost_gain = config.short_boost_gain;
+    motor_position_config.approach_zone_cm = config.approach_zone_cm;
+    motor_position_config.approach_ratio = config.approach_ratio;
+    motor_position_config.approach_acc_k = config.approach_acc_k;
+    motor_position_config.yaw_lin_band_rad = config.yaw_lin_band_rad;
+    motor_position_config.yaw_kd = config.yaw_kd;
+    motor_position_config.yaw_kd_translate = config.yaw_kd_translate;
     navigation_mount_deg = config.mount_deg;
     navigation_scale_x = config.scale_x;
     navigation_scale_y = config.scale_y;

@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "sliders": [
+    {
+      "name": "dr_kd",
+      "minimum": "0",
+      "maximum": "50",
+      "step": "0.1",
+      "value": "30",
+      "draft": [
+        0.0,
+        50.0,
+        0.1
+      ]
+    }
+  ],
+  "buttons": [],
+  "controls": {
+    "bind_ip": "192.168.0.116",
+    "bind_port": 8081,
+    "remote_ip": "192.168.0.108",
+    "remote_port": 5001,
+    "max_samples": 1200,
+    "imu_zoom": 1.0,
+    "imu_quality": "精细",
+    "mcar_mode": true,
+    "mcar_names": "ul_raw,ur_raw,dl_raw,dr_raw,ul_cmps,ur_cmps,dl_cmps,dr_cmps",
+    "mcar_period": 10,
+    "plot_window": 10.1,
+    "plot_refresh_hz": "60"
+  },
+  "rules": [
+    {
+      "name": "ul_raw",
+      "data_type": "float32",
+      "offset": 0,
+      "byte_order": "little"
+    },
+    {
+      "name": "ur_raw",
+      "data_type": "float32",
+      "offset": 4,
+      "byte_order": "little"
+    },
+    {
+      "name": "dl_raw",
+      "data_type": "float32",
+      "offset": 8,
+      "byte_order": "little"
+    },
+    {
+      "name": "dr_raw",
+      "data_type": "float32",
+      "offset": 12,
+      "byte_order": "little"
+    },
+    {
+      "name": "ul_cmps",
+      "data_type": "float32",
+      "offset": 16,
+      "byte_order": "little"
+    },
+    {
+      "name": "ur_cmps",
+      "data_type": "float32",
+      "offset": 20,
+      "byte_order": "little"
+    },
+    {
+      "name": "dl_cmps",
+      "data_type": "float32",
+      "offset": 24,
+      "byte_order": "little"
+    },
+    {
+      "name": "dr_cmps",
+      "data_type": "float32",
+      "offset": 28,
+      "byte_order": "little"
+    }
+  ],
+  "plot_selected": [],
+  "active_page": "params",
+  "view_yaw": -55.0,
+  "view_elev": 30.0
+}

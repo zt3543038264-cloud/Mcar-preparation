@@ -30,6 +30,17 @@ typedef struct
     float max_alpha_radps2;
     float xy_tolerance_cm;
     float yaw_tolerance_deg;
+    /* ivision 式开环规划参数（Flash v3 新增，v1/v2 存档加载时用默认值） */
+    float brake_limit;
+    float brake_ceiling_cmps2;
+    float short_segment_cm;
+    float short_boost_gain;
+    float approach_zone_cm;
+    float approach_ratio;
+    float approach_acc_k;
+    float yaw_lin_band_rad;
+    float yaw_kd;
+    float yaw_kd_translate;
 
     /* Navigation 安装参数 */
     float mount_deg;
