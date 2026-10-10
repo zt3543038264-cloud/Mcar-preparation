@@ -88,6 +88,8 @@ IMU660RA 使用 SPI4：C23/C22/C21/C20。上电后须保持静止，连续取得
 
 WiFi 菜单显示 Status、Packets（成功数据帧数）、Attempts、LastErr、Channels、Period_ms、Stream、Commands 和 CmdErr。接口 `wifi_justfloat(...)`/`wifispi_send_floats(data,count)` 仍保留供单独调试；启用自动订阅上传时应统一使用所选通道，避免混入另一组无映射数据。
 
+加入新的调参参数，wifispi.c里加数组
+
 ## 编码器与 IMU 定位融合
 
 融合在 `navigation_fusion.c` 实现，由 `app_navigation.c` 接入现有调度：每个成功的 5 ms IMU 新帧预测速度，每 10 ms 读取一次方向修正后的四轮原始计数，修正速度并更新位置。重复 IMU 帧不会重复积分；编码器不会被二次读取或清零。PWM 测试和 Run=Off 时仍跟踪实际运动，融合输出已接到可选的位置外环，不包含路线回放。

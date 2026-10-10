@@ -3,6 +3,7 @@
 
 #include "zf_driver_flash.h"
 #include "Motor.h"
+#include "route_follow.h"
 
 /* 使用 4MB Flash 最后一个 32KB 扇区（127 号扇区）保存参数，远离程序代码区。
  * 与原工程保持一致的分区选择，擦写只影响该扇区。 */
@@ -35,6 +36,10 @@ typedef struct
     float scale_x;
     float scale_y;
     uint8 yaw_reversed;
+
+    /* Route data only: runtime state and Run are never persisted. */
+    uint8 route_node_count;
+    route_node_t route_nodes[ROUTE_MAX_NODES];
 } menu_flash_config_t;
 
 uint8 Data_save_to_flash(const menu_flash_config_t *config);

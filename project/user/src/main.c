@@ -15,11 +15,11 @@ int main(void)
     system_delay_ms(300);
 
     app_control_init();
+    route_follow_init();
     /* Flash 参数存取：先初始化 FlexSPI ROM 驱动，再尝试加载上次保存的参数。
      * 首次运行或校验失败时返回 0，继续使用代码中的默认值。 */
     flash_init();
     menu_flash_load_current();
-    route_follow_init();
     imu_init();
     Menu_Init();
 

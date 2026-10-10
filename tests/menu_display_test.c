@@ -3,6 +3,7 @@
 #include "Motor.h"
 #include "app_control.h"
 #include "app_navigation.h"
+#include "route_follow.h"
 #include "imu.h"
 #include "wifispi.h"
 #include "zf_device_ips200.h"
@@ -30,6 +31,14 @@ volatile uint32_t wifi_telemetry_stream_enabled, wifi_telemetry_commands, wifi_t
 static key_state_enum events[KEY_NUMBER];
 static motor_speed_debug_snapshot_t snapshot;
 static unsigned draw_calls, irq_disabled;
+static unsigned flash_saves;
+uint8 menu_flash_save_current(void)
+{
+    assert(!irq_disabled);
+    route_follow_stop();
+    ++flash_saves;
+    return 1;
+}
 void app_control_get_position_snapshot(position_output_t *out)
 { assert(irq_disabled); *out = position_snapshot; }
 static char rows[20][31];
@@ -71,6 +80,20 @@ static void press(key_index_enum key)
     Menu_Switch();
     Menu_Show();
 }
+static void enter_root_folder(const char *name)
+{
+    for (unsigned attempt = 0; attempt < 12; ++attempt)
+    {
+        for (unsigned row = 1; row <= 7; ++row)
+            if (rows[row][0] == '>' && !strncmp(rows[row] + 2, name, strlen(name)))
+            {
+                press(KEY_1);
+                return;
+            }
+        press(KEY_4);
+    }
+    assert(!"Root folder not found");
+}
 
 int main(void)
 {
@@ -87,10 +110,7 @@ int main(void)
     assert(strstr(rows[0], "Position") != NULL && strstr(rows[1], "On") != NULL);
     assert(!motor_run_enabled && !motor_pwm_test_enabled);
     press(KEY_3); /* Root/Position */
-    press(KEY_4); /* PWM_Test */
-    press(KEY_4); /* Drive */
-    press(KEY_4); /* Encoder */
-    press(KEY_1);
+    enter_root_folder("Encoder");
     assert(strstr(rows[0], "Encoder") != NULL);
     assert(strstr(rows[1], "Total") != NULL);
     assert(strstr(rows[2], "2147483647") != NULL);
@@ -101,12 +121,11 @@ int main(void)
     Menu_Tick_20ms(); Menu_Show();
     assert(draw_calls > previous);
     press(KEY_3); /* Root */
-    press(KEY_4); /* Navigation */
     nav_snapshot.status = NAV_RUNNING;
     nav_snapshot.valid = nav_snapshot.bias_ready = true;
     nav_snapshot.x_m = -1.23f; nav_snapshot.y_m = 4.56f;
     nav_snapshot.vx_mps = 0.12f; nav_snapshot.vy_mps = -0.34f;
-    press(KEY_1);
+    enter_root_folder("Navigation");
     assert(strstr(rows[0], "Navigation") != NULL);
     assert(strstr(rows[2], "-123.000") != NULL);
     assert(strstr(rows[3], "456.000") != NULL);
@@ -125,7 +144,7 @@ int main(void)
     assert(navigation_scale_y == 2.0f && navigation_scale_x == 0.1f);
     press(KEY_3); press(KEY_3); /* deselect then Root */
     /* Draw each root folder and its full-width values. */
-    for (unsigned i = 0; i < 9; ++i)
+    for (unsigned i = 0; i < 11; ++i)
     {
         if (i == 4) assert(strstr(rows[7], "PID") != NULL); /* eighth folder scrolls into view */
         press(KEY_1);
@@ -156,10 +175,44 @@ int main(void)
     press(KEY_1); press(KEY_2); /* Read-only values don't select or modify */
     assert(position_snapshot.yaw_error_deg == 0.0f);
     /* Return from Position to PWM_Test, selecting direct PWM cancels position/Run. */
-    press(KEY_3); press(KEY_4); press(KEY_1);
+    press(KEY_3); enter_root_folder("PWM_Test");
     motor_run_enabled = true;
     press(KEY_1); press(KEY_2);
     assert(motor_pwm_test_enabled && !motor_position_enabled && !motor_run_enabled);
+    press(KEY_3); press(KEY_3); /* deselect, then Root/PWM_Test */
+    press(KEY_2); press(KEY_2); /* Root/SaveCfg, then Route */
+    press(KEY_1); /* Route/Run */
+    assert(strstr(rows[0], "Route") != NULL);
+    press(KEY_4); press(KEY_1); /* Route/Nodes selected */
+    for (unsigned step = 0; step < 5; ++step)
+    {
+        press(KEY_1); /* Cycle through every global step, including 10 and 100. */
+        route_node_count = 1;
+        for (int count = 2; count <= ROUTE_MAX_NODES; ++count)
+        {
+            press(KEY_2);
+            assert(route_node_count == count);
+        }
+        press(KEY_2); assert(route_node_count == ROUTE_MAX_NODES);
+        for (int count = ROUTE_MAX_NODES - 1; count >= 1; --count)
+        {
+            press(KEY_4);
+            assert(route_node_count == count);
+        }
+        press(KEY_4); assert(route_node_count == 1);
+        assert(strstr(rows[0], "1.00") != NULL);
+    }
+    events[KEY_2] = KEY_REPEAT_PRESS; Menu_Switch(); Menu_Show();
+    assert(route_node_count == 2);
+    route_follow_start(); route_state = ROUTE_RUNNING; motor_run_enabled = true;
+    press(KEY_2);
+    assert(route_node_count == 3 && route_state == ROUTE_IDLE && !motor_run_enabled);
+    press(KEY_3); /* deselect Nodes */
+    for (unsigned i = 0; i < 27; ++i) press(KEY_4); /* Route/SaveCfg */
+    assert(strstr(rows[7], "SaveCfg") != NULL);
+    press(KEY_1); press(KEY_2);
+    assert(flash_saves == 1 && !route_run_flag && !motor_run_enabled);
+    puts("route menu passed: Nodes 1..8 at every step, repeat, cancel on edit, SaveCfg");
     puts("menu display tests passed: bounds, full signed totals, 100ms refresh, root folders");
     return 0;
 }

@@ -36,8 +36,12 @@ def control_reply(packet: bytes) -> tuple[str, str] | None:
         raise ValueError("MCAR 应答缺少换行")
     text = packet.decode("ascii").strip()
     parts = text.split(" ", 2)
-    if len(parts) != 3 or parts[1] not in {"SUB", "LIST", "RATE", "STREAM", "ERR"}:
+    if len(parts) != 3 or parts[1] not in {"SUB", "LIST", "RATE", "STREAM", "ERR", "SLIDER"}:
         raise ValueError("无效的 MCAR 应答")
+    if parts[1] == "SLIDER":
+        parameter = parts[2].split()
+        if len(parameter) != 2 or not math.isfinite(float(parameter[1])):
+            raise ValueError("无效的调参确认")
     return parts[1], parts[2]
 
 

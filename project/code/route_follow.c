@@ -6,14 +6,10 @@
 /* 默认路线：(0,0) -> (20,40) -> (50,80)，可在菜单 Route 中修改。
  * 坐标是 Navigation/Zero 坐标系下的 cm；先静止 Zero，再开 Run。 */
 bool route_run_flag;
-volatile int16_t route_node_count = 3;
+volatile int16_t route_node_count = ROUTE_DEFAULT_NODE_COUNT;
 volatile int32_t route_state = ROUTE_IDLE;
 volatile int32_t route_current_idx;
-route_node_t route_nodes[ROUTE_MAX_NODES] = {
-    {  0.0f,  0.0f, 0.0f},
-    { 20.0f, 40.0f, 0.0f},
-    { 50.0f, 80.0f, 0.0f},
-};
+route_node_t route_nodes[ROUTE_MAX_NODES] = ROUTE_DEFAULT_NODES;
 
 /* 切入位置模式后等待的控制周期数：一拍被模式切换逻辑消耗，再留一拍稳定 */
 #define ROUTE_ARM_SETTLE_TICKS 2U

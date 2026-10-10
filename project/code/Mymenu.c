@@ -174,6 +174,7 @@ static void menu_create(void)
 
     /* 根目录保存项：置 On 即把当前 PID/位置环/导航参数写入 Flash */
     g_flash_save=false;
+    Create_Menu_File_dynamic(route,"SaveCfg",&g_flash_save,bool_Box);
     Create_Menu_File_dynamic(&g_root,"SaveCfg",&g_flash_save,bool_Box);
 }
 static void menu_format_value(const Menu_Item *item,char *buffer,size_t size)
@@ -197,7 +198,7 @@ static void menu_draw(void)
     uint8_t row;
     unsigned first_row=g_pointer->rank>MENU_VISIBLE_LINES ?
                        (unsigned)g_pointer->rank-MENU_VISIBLE_LINES : 0u;
-    snprintf(line,sizeof(line),"%-20s <%5.2f>",g_pointer->Father->name,(double)g_steps[g_step_index]);
+    snprintf(line,sizeof(line),"%-20s <%5.2f>",g_pointer->Father->name,(double)(g_pointer->data==(void *)&route_node_count ? 1.0f : g_steps[g_step_index]));
     menu_show_line(0,line);
     if(g_pointer->Father==g_encoder_folder) {
         menu_show_line(MENU_LINE_HEIGHT," Wheel Raw Filt Total");
@@ -355,7 +356,7 @@ static void menu_adjust(int direction)
         *(float *)g_pointer->data=value;
         if(route_follow_is_node_field(g_pointer->data)) route_follow_config_edited();
     } else if(g_pointer->kind==int16_Box) {
-        int step=(int)g_steps[g_step_index],value;
+        int step=g_pointer->data==(void *)&route_node_count ? 1 : (int)g_steps[g_step_index],value;
         if(step<1) step=1;
         value=*(int16_t *)g_pointer->data+step*direction;
         if(g_pointer->data==(void *)&route_node_count) {

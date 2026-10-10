@@ -51,6 +51,10 @@ class ProtocolTest(unittest.TestCase):
         self.assertIsNone(control_reply(data))
         self.assertIsNone(control_reply(b"MCAR abc" + TAIL))  # 浮点字节碰巧与文本前缀相同。
         self.assertEqual(control_reply(b"MCAR SUB x_cm,y_cm\n"), ("SUB", "x_cm,y_cm"))
+        self.assertEqual(control_reply(b"MCAR SLIDER pos_xy_kp 2.501\n"), ("SLIDER", "pos_xy_kp 2.501"))
+        for invalid in (b"MCAR SLIDER kp nan\n", b"MCAR SLIDER kp\n"):
+            with self.assertRaises(ValueError):
+                control_reply(invalid)
         for packet in (data[:-4], data, b"MCAR SUB x_cm\n", struct.pack("<ff", math.nan, 1) + TAIL):
             with self.assertRaises(ValueError):
                 validate_frame(packet, 2)
