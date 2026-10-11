@@ -1,10 +1,4 @@
-#include "path_follow.h"
-#include "motor.h"
-#include "pid.h"
-#include "zf_device_ips200.h"
-#include <math.h>
-#include <string.h>
-#include "Attitude.h"
+# WiFi-SPI 遥测、上传变量订阅与滑杆调参
 
 /**
  * @file path_follow.c
@@ -45,19 +39,7 @@
 /** @brief IMU Z 轴角速度到世界航向正方向的符号修正�?*/
 #define PATH_FOLLOW_GYRO_Z_TO_YAW_SIGN 1.0f
 
-/* 路径段二维查表补偿
- * 坐标约定：车体系 +X 为前进，-X 为后退，+Y 为左移，-Y 为右移。
- *
- * 距离补偿表：
- *   error_cm > 0 表示实际走短了，命令主方向距离需要增大；
- *   error_cm < 0 表示实际走长了，命令主方向距离需要减小；
- *   cmd_abs = target_abs + error_cm / 100。
- *
- * 串轴补偿表：
- *   表中数值直接表示需要额外给副轴的车体系补偿量，单位 cm；
- *   前/后段补偿 Y，左/右段补偿 X。
- */
-#define PATH_DISTANCE_COMP_ENABLE 1
+控制请求：ASCII，区分大小写。原有 SUB/RATE/STREAM/LIST?/GET? 每条以 LF `\n` 结尾，CRLF 也可；新增滑杆包以 `]` 结束，可不带换行。逐飞 SPI 接收是字节流，本实现接受分段与连续多条命令；建议在同一个 UDP 数据报中发送一条完整命令。命令正文最多 1023 字节，滑杆包长度包含左右方括号。单个配置操作串行等待应答，不要同时用多个客户端改变订阅。
 
 #define PATH_DISTANCE_COMP_MIN_APPLY_M 0.0005f
 #define PATH_DISTANCE_COMP_MIN_CMD_M 0.0001f
@@ -126,24 +108,79 @@ static path_follow_distance_comp_sample_t g_path_comp_left_table[] = {
     {2.8f,  49.50f}
 };
 
-/* 右移距离补偿：右移也改为查表，形式与前/后/左移一致。 */
-static path_follow_distance_comp_sample_t g_path_comp_right_table[] = {
-    {0.0f,   0.00f},
-    {0.2f,   1.23f},
-    {0.4f,   2.66f},
-    {0.6f,   2.96f},
-    {0.8f,   5.96f},
-    {1.0f,   11.76f},
-    {1.2f,  13.96f},
-    {1.4f,  15.33f},
-    {1.6f,  25.96f},
-    {1.8f,  32.46f},
-    {2.0f,  38.88f},
-    {2.2f,  51.30f},
-    {2.4f,  58.66f},
-    {2.6f,  71.33f},
-    {2.8f,  60.66f}
-};
+## 滑杆数据包：修改一个参数
+
+只需要三个字段，UTF-8/ASCII 文本均可，但类型和参数名使用下面的 ASCII 名称：
+
+```text
+[slider,参数名,数值]
+```
+
+例如滑杆改变位置环 Kp：
+
+```text
+[slider,pos_xy_kp,2.5]
+```
+
+也接受带双引号的 JSON 数组，数值必须是数字，不能是字符串：
+
+```json
+["slider", "pos_xy_kp", 2.5]
+```
+
+三字段分别是控件类型 `slider`、参数名 `pos_xy_kp`、要写入的值 `2.5`。空格可以省略。以 `]` 立即结包，不需要额外发送 `\n`；同一接收流中可连续出现多包，也可和原有换行命令混用。解析仅支持这种简单数组，不支持嵌套数组、字符串转义、额外字段或任意内存地址。
+
+成功后返回实际写入的 float32 值：
+
+```text
+MCAR SLIDER pos_xy_kp 2.5\n
+```
+
+失败返回 `MCAR ERR <原因>\n`，例如：
+
+```text
+MCAR ERR unknown parameter
+MCAR ERR parameter out of range
+MCAR ERR parameter requires Run off
+MCAR ERR expected [slider,parameter,number]
+```
+
+每包修改一个参数，校验失败不修改。只更新 RAM，重启恢复启动配置。轮速 PID 修改会同时更新初始化参数和实际 PID，并清除该轮 PID 历史状态；重复发送同一值且运行参数已经一致时不重复清除。调参不启动电机，不改变模式。
+
+### 已支持的参数名
+
+| 参数名 | 范围 | 单位/作用 |
+| --- | --- | --- |
+| `pos_xy_kp` | 0.01～20 | 平移位置比例，1/s |
+| `pos_xy_kd` | 0～5 | 平移速度阻尼系数 |
+| `pos_yaw_kp` | 0.01～20 | 航向比例，1/s |
+| `pos_max_speed_cmps` | 1～100 | 平移最大速度，cm/s |
+| `pos_max_omega_radps` | 0.05～3 | 最大角速度，rad/s |
+| `pos_max_accel_cmps2` | 1～300 | 平移最大加速度，cm/s² |
+| `pos_max_alpha_radps2` | 0.05～10 | 最大角加速度，rad/s² |
+| `pos_xy_tolerance_cm` | 0.5～20 | 位置到达容差，cm |
+| `pos_yaw_tolerance_deg` | 0.5～20 | 航向到达容差，度 |
+| `ul_kp,ul_ki,ul_kd` | 各 0～1000 | 左前轮速度 PID |
+| `ur_kp,ur_ki,ur_kd` | 各 0～1000 | 右前轮速度 PID |
+| `dl_kp,dl_ki,dl_kd` | 各 0～1000 | 左后轮速度 PID |
+| `dr_kp,dr_ki,dr_kd` | 各 0～1000 | 右后轮速度 PID |
+| `goal_x_cm,goal_y_cm` | 各 -10000～10000 | 目标坐标，cm；仅 Run=Off 可改 |
+| `goal_yaw_deg` | -180～180 | 目标航向，度；仅 Run=Off 可改 |
+| `scale_x,scale_y` | 各 0.01～10 | 定位比例；仅 Run=Off 可改，修改后定位会重新 Zero |
+
+数值支持普通小数、负数和科学计数法，例如 `-125`、`2.5`、`1e-2`。NaN、Infinity、十六进制数、带引号的数值和超出范围的值不接受。实际应用值以应答为准。
+
+新增参数在 `wifispi.c` 的 `g_slider_parameters` 中加一条映射即可，例如：
+
+```c
+SLIDER("my_gain", &my_gain, 0.0f, 10.0f, 0),
+```
+
+五项依次是上位机使用的名称、可写 `float` 变量地址、最小值、最大值、是否仅允许 Run=Off 写入。运行控制每 10 ms 从这些参数读取新值，赋值在短临界区内完成，网络收发不关中断。当前只支持 `slider` 控件类型。
+
+上位机界面可直接将“滑杆对应的参数名”和“滑杆当前数值”组成上述数组发送到模块 IP:5001；接收 `MCAR SLIDER ...` 作为确认，不进入 JustFloat 绘图。现有 GUI 的原控制解析器尚不认识 `SLIDER` 应答，由你新增的调参界面接收处理即可。拖动时建议限频，释放滑杆时再发送最终值；UDP 无序号，固件按实际收到的顺序应用，必要时用已有同名遥测通道核对。
+
+## 公开变量及单位
 
 /* 前进/后退段的 Y 串轴补偿表，单位 cm；+Y 为左移，-Y 为右移。 */
 static path_follow_distance_comp_sample_t g_path_cross_fwd_y_table[] = {
