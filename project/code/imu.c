@@ -1,5 +1,5 @@
 /** 5ms 流水线：读 IMU -> 校验 dt -> 标定/姿态融合 -> 发布欧拉角。
- * 保持仓库原错误状态和恢复行为，不改变寄存器、量程和采样周期。
+ * 保持仓库原错误状态和恢复行为，不改变采样周期；陀螺量程为 ±500dps。
  */
 #include "imu.h"
 #include "attitude.h"
@@ -19,6 +19,11 @@ volatile float imu_roll_deg, imu_pitch_deg, imu_yaw_deg;
 volatile float imu_accel_norm_g, imu_calibration_percent;
 volatile float imu_accel_g[3], imu_gyro_dps[3];
 volatile float imu_gyro_bias_z_dps;
+volatile float imu_sample_dt_ms, imu_solve_us, imu_solve_max_us;
+volatile int32 imu_accel_used=-1;
+volatile float imu_ekf_nis=-1.0f, imu_ekf_bias_xy_dps[2];
+volatile uint32 imu_sample_sequence;
+volatile float imu_gyro_z_integral_deg;
 const uint8 imu_attitude_method=AHRS_METHOD;
 static Ahrs6 g_attitude;
 static ImuCalibration g_calibration;
@@ -47,15 +52,31 @@ static void imu_publish_navigation(const float gyro_dps[3],const float accel_g[3
     for(i=0u;i<3u;++i) {
         g_navigation_sample.accel_g[i]=accel_g[i];
         g_navigation_sample.gyro_dps[i]=gyro_dps[i]-g_calibration.bias_dps[i];
+#if AHRS_METHOD == AHRS_METHOD_EKF
+        if(i<2u) g_navigation_sample.gyro_dps[i]-=g_attitude.bias_xy[i]*RAD_TO_DEG;
+#endif
     }
     ++g_navigation_sample.sequence;
     if(g_navigation_sample.sequence==0u) ++g_navigation_sample.sequence;
+    imu_sample_sequence=g_navigation_sample.sequence;
 }
 
 /* uint32 无符号做差处理单次计数回绕；保留原 DWT 时间基准。 */
 static uint32 imu_ticks(void) { return DWT->CYCCNT; }
 static float imu_seconds(uint32 elapsed) { return (float)elapsed/(float)system_clock; }
 static uint32 imu_ms_ticks(uint32 ms) { return (system_clock/1000u)*ms; }
+/* Publish only completed solves; max lasts until IMU reinitialization. */
+static void imu_publish_filter_diagnostics(uint32 started)
+{
+    imu_solve_us=imu_seconds((uint32)(imu_ticks()-started))*1000000.0f;
+    if(imu_solve_us>imu_solve_max_us) imu_solve_max_us=imu_solve_us;
+    imu_accel_used=g_attitude.accel_used;
+#if AHRS_METHOD == AHRS_METHOD_EKF
+    imu_ekf_nis=g_attitude.innovation_nis;
+    imu_ekf_bias_xy_dps[0]=g_attitude.bias_xy[0]*RAD_TO_DEG;
+    imu_ekf_bias_xy_dps[1]=g_attitude.bias_xy[1]*RAD_TO_DEG;
+#endif
+}
 static void imu_reg_write(uint8 reg,uint8 value)
 {
     IMU660RA_CS(0);
@@ -84,22 +105,22 @@ static uint8 imu_read_sample(float gyro_dps[3],float accel_g[3])
         int16 acc_raw=(int16)((uint16)data[1u+2u*i]|((uint16)data[2u+2u*i]<<8));
         int16 gyro_raw=(int16)((uint16)data[7u+2u*i]|((uint16)data[8u+2u*i]<<8));
         accel_g[i]=(float)acc_raw/4096.0f;
-        gyro_dps[i]=(float)gyro_raw/16.4f;
+        gyro_dps[i]=(float)gyro_raw/65.6f;
     }
     return 1u;
 }
 static uint8 imu_hardware_init(void)
 {
     if (imu660ra_init()!=0u) return 0u;
-    /* 加速度与陀螺均为 200Hz，回读确认配置成功。 */
+    /* 加速度与陀螺均为 200Hz，量程 ±8g/±500dps，回读确认配置成功。 */
     imu_reg_write(IMU660RA_ACC_CONF,0xA9u);
     imu_reg_write(IMU660RA_GYR_CONF,0xA9u);
     imu_reg_write(IMU660RA_ACC_RANGE,0x02u);
-    imu_reg_write(IMU660RA_GYR_RANGE,0x00u);
+    imu_reg_write(IMU660RA_GYR_RANGE,0x02u);
     return (imu_reg_read(IMU660RA_ACC_CONF)==0xA9u &&
             imu_reg_read(IMU660RA_GYR_CONF)==0xA9u &&
             imu_reg_read(IMU660RA_ACC_RANGE)==0x02u &&
-            imu_reg_read(IMU660RA_GYR_RANGE)==0x00u)?1u:0u;
+            imu_reg_read(IMU660RA_GYR_RANGE)==0x02u)?1u:0u;
 }
 static void imu_reset_pipeline(void)
 {
@@ -111,6 +132,11 @@ static void imu_reset_pipeline(void)
     imu_roll_deg=0.0f; imu_pitch_deg=0.0f; imu_yaw_deg=0.0f;
     imu_accel_norm_g=0.0f; imu_calibration_percent=0.0f;
     imu_gyro_bias_z_dps=0.0f;
+    imu_sample_dt_ms=imu_solve_us=imu_solve_max_us=0.0f;
+    imu_accel_used=-1; imu_ekf_nis=-1.0f;
+    imu_ekf_bias_xy_dps[0]=imu_ekf_bias_xy_dps[1]=0.0f;
+    imu_sample_sequence=0u;
+    imu_gyro_z_integral_deg=0.0f;
     g_last_sample_ticks=imu_ticks();
     g_last_success_ticks=g_last_sample_ticks;
 }
@@ -130,7 +156,7 @@ void imu_init(void)
 void imu_update_5ms(void)
 {
     float gyro_dps[3],accel_g[3],gyro_rad_s[3],euler[3],dt;
-    uint32 now;
+    uint32 now, solve_started;
     uint8 i;
     /* BAD_DT/FILTER_ERROR 保留原锁止行为；需重新标定恢复。 */
     if (!g_update_enabled || imu_attitude_status==IMU_ATTITUDE_BAD_DT ||
@@ -150,6 +176,7 @@ void imu_update_5ms(void)
     imu_accel_norm_g=sqrtf(accel_g[0]*accel_g[0]+accel_g[1]*accel_g[1]+accel_g[2]*accel_g[2]);
     /* 第一帧只建立采样时间基准。 */
     if (!g_have_sample) { g_have_sample=1u; return; }
+    imu_sample_dt_ms=dt*1000.0f;
     if (dt<=0.0f || dt>MAX_SAMPLE_DT) {
         imu_attitude_status=IMU_ATTITUDE_BAD_DT; return;
     }
@@ -168,10 +195,13 @@ void imu_update_5ms(void)
     }
     for (i=0u;i<3u;++i)
         gyro_rad_s[i]=(gyro_dps[i]-g_calibration.bias_dps[i])*DEG_TO_RAD;
+    solve_started=imu_ticks();
     if (!ahrs6_update(&g_attitude,gyro_rad_s,accel_g,dt)) {
         imu_attitude_status=IMU_ATTITUDE_FILTER_ERROR; return;
     }
     ahrs6_euler(&g_attitude,euler);
+    imu_publish_filter_diagnostics(solve_started);
+    imu_gyro_z_integral_deg += gyro_rad_s[2]*RAD_TO_DEG*dt;
     imu_roll_deg=euler[0]; imu_pitch_deg=euler[1]; imu_yaw_deg=euler[2];
     imu_accel_norm_g=g_attitude.accel_norm;
     imu_attitude_status=IMU_ATTITUDE_RUNNING;

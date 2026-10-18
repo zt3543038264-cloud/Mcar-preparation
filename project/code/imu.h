@@ -22,6 +22,15 @@ extern volatile float imu_calibration_percent; /* 静止标定进度，0~100 */
 extern volatile float imu_accel_g[3]; /* 原始 X/Y/Z 加速度，g */
 extern volatile float imu_gyro_dps[3]; /* 未扣静止零偏的角速度，deg/s */
 extern volatile float imu_gyro_bias_z_dps; /* 当前生效的 z 轴零偏（含静止跟踪修正） */
+/* Diagnostics: dt in ms, solve time in us (filter + Euler, excludes SPI).
+ * accel_used: -1=no completed update, 0=rejected, 1=fused.
+ * EKF NIS: -1=not evaluated/not EKF; bias_xy is residual, not startup bias. */
+extern volatile float imu_sample_dt_ms, imu_solve_us, imu_solve_max_us;
+extern volatile int32 imu_accel_used;
+extern volatile float imu_ekf_nis, imu_ekf_bias_xy_dps[2];
+extern volatile uint32 imu_sample_sequence;
+/* Unwrapped calibrated sensor-Z rate integral (deg), not full 3D Euler yaw. */
+extern volatile float imu_gyro_z_integral_deg;
 extern const uint8 imu_attitude_method;
 
 /* 同一成功采样帧的姿态、加速度和扣零偏角速度，供定位融合使用。

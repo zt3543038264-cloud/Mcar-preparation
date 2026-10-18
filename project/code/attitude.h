@@ -53,7 +53,25 @@ void madgwick6_euler(const Madgwick6 *s, float e[3]);
 void madgwick6_cube_euler(const Madgwick6 *s, float e[3]);
 
 /* 仍按原 AHRS_METHOD 编译期选型，两种算法的原接口均保留。 */
-#if AHRS_METHOD == AHRS_METHOD_MAHONY
+/* Quaternion nominal state, local angle error + X/Y residual gyro bias.
+ * Z bias remains handled by wheel-confirmed stationary calibration in imu.c.
+ * Fixed-size storage; no allocator or matrix library required. */
+typedef struct {
+    float q[4], bias_xy[2], covariance[5][5], accel_lpf[3];
+    float accel_norm, innovation_nis;
+    int accel_used;
+} Ekf6;
+int ekf6_init(Ekf6 *s, const float a[3]);
+int ekf6_update(Ekf6 *s, const float g[3], const float a[3], float dt);
+void ekf6_euler(const Ekf6 *s, float e[3]);
+void ekf6_cube_euler(const Ekf6 *s, float e[3]);
+#if AHRS_METHOD == AHRS_METHOD_EKF
+typedef Ekf6 Ahrs6;
+#define ahrs6_init ekf6_init
+#define ahrs6_update ekf6_update
+#define ahrs6_euler ekf6_euler
+#define ahrs6_cube_euler ekf6_cube_euler
+#elif AHRS_METHOD == AHRS_METHOD_MAHONY
 typedef Mahony6 Ahrs6;
 #define ahrs6_init mahony6_init
 #define ahrs6_update mahony6_update

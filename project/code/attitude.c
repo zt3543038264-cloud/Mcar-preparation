@@ -219,3 +219,188 @@ int madgwick6_update(Madgwick6 *s,const float g[3],const float a[3],float dt)
 }
 void madgwick6_euler(const Madgwick6 *s,float e[3]) { attitude_euler(s->q,e); }
 void madgwick6_cube_euler(const Madgwick6 *s,float e[3]) { attitude_cube_euler(s->q,e); }
+
+/* Quaternion error-state EKF, adapted from the QuaternionEKF design in
+ * ../project/code (Wang Hongxi): gravity observation, residual bias estimate,
+ * acceleration LPF and innovation gating. Uses a minimal local error instead
+ * of four unconstrained quaternion errors. Units: rad/s, g, seconds.
+ * The fifth error state is by; bz is deliberately not inferred from gravity.
+ */
+static void ekf_skew(const float v[3], float m[3][3])
+{
+    m[0][0]=0; m[0][1]=-v[2]; m[0][2]=v[1];
+    m[1][0]=v[2]; m[1][1]=0; m[1][2]=-v[0];
+    m[2][0]=-v[1]; m[2][1]=v[0]; m[2][2]=0;
+}
+static int ekf_rotate(float q[4], const float angle[3])
+{
+    float n=sqrtf(angle[0]*angle[0]+angle[1]*angle[1]+angle[2]*angle[2]);
+    float k=n>1e-8f?sinf(0.5f*n)/n:0.5f;
+    float c=cosf(0.5f*n), x=angle[0]*k,y=angle[1]*k,z=angle[2]*k;
+    float w=q[0],qx=q[1],qy=q[2],qz=q[3];
+    unsigned i;
+    q[0]=w*c-qx*x-qy*y-qz*z;
+    q[1]=w*x+qx*c+qy*z-qz*y;
+    q[2]=w*y-qx*z+qy*c+qz*x;
+    q[3]=w*z+qx*y-qy*x+qz*c;
+    n=sqrtf(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]);
+    if (!finite_float(n) || n<1e-6f) return 0;
+    for(i=0;i<4;++i) q[i]/=n;
+    return 1;
+}
+/* Carry acceleration history into the current body frame using gyro motion.
+ * Rotate by dq^-1: a gravity vector expressed in the rotating sensor frame. */
+static int ekf_transport_accel(float v[3], const float angle[3])
+{
+    float dq[4]={1,0,0,0},x,y,z,w,out[3];
+    if(!ekf_rotate(dq,angle)) return 0;
+    w=dq[0]; x=dq[1]; y=dq[2]; z=dq[3];
+    out[0]=(1-2*(y*y+z*z))*v[0]+2*(x*y+w*z)*v[1]+2*(x*z-w*y)*v[2];
+    out[1]=2*(x*y-w*z)*v[0]+(1-2*(x*x+z*z))*v[1]+2*(y*z+w*x)*v[2];
+    out[2]=2*(x*z+w*y)*v[0]+2*(y*z-w*x)*v[1]+(1-2*(x*x+y*y))*v[2];
+    memcpy(v,out,sizeof(out)); return 1;
+}
+static float ekf_yaw_rad(const float q[4])
+{
+    return atan2f(2*(q[0]*q[3]+q[1]*q[2]),1-2*(q[2]*q[2]+q[3]*q[3]));
+}
+/* Gravity does not observe heading. Preserve the gyro-predicted Euler yaw
+ * exactly after the finite tilt injection (projected gain is first order). */
+static void ekf_preserve_yaw(float q[4], float predicted_yaw)
+{
+    float d=predicted_yaw-ekf_yaw_rad(q),c=cosf(.5f*d),s=sinf(.5f*d);
+    float w=q[0],x=q[1],y=q[2],z=q[3];
+    q[0]=c*w-s*z; q[1]=c*x-s*y; q[2]=c*y+s*x; q[3]=c*z+s*w;
+}
+/* P <- F P F^T; works in-place with fixed workspace. */
+static void ekf_cov_transform(float p[5][5], const float f[5][5])
+{
+    float t[5][5]={{0}},out[5][5]={{0}};
+    unsigned i,j,k;
+    for(i=0;i<5;++i) for(j=0;j<5;++j) for(k=0;k<5;++k)
+        t[i][j]+=f[i][k]*p[k][j];
+    for(i=0;i<5;++i) for(j=0;j<5;++j) for(k=0;k<5;++k)
+        out[i][j]+=t[i][k]*f[j][k];
+    memcpy(p,out,sizeof(out));
+}
+static int ekf_inverse3(const float s[3][3],float inv[3][3])
+{
+    float aug[3][6]; unsigned i,j,k;
+    for(i=0;i<3;++i) for(j=0;j<6;++j)
+        aug[i][j]=j<3?s[i][j]:(j-3==i?1.0f:0.0f);
+    for(i=0;i<3;++i) {
+        unsigned pivot=i;
+        for(j=i+1;j<3;++j) if(fabsf(aug[j][i])>fabsf(aug[pivot][i])) pivot=j;
+        if(!finite_float(aug[pivot][i]) || fabsf(aug[pivot][i])<1e-12f) return 0;
+        for(k=0;k<6;++k) { float v=aug[i][k]; aug[i][k]=aug[pivot][k]; aug[pivot][k]=v; }
+        { float d=aug[i][i]; for(k=0;k<6;++k) aug[i][k]/=d; }
+        for(j=0;j<3;++j) if(j!=i) {
+            float d=aug[j][i]; for(k=0;k<6;++k) aug[j][k]-=d*aug[i][k];
+        }
+    }
+    for(i=0;i<3;++i) for(j=0;j<3;++j) inv[i][j]=aug[i][j+3];
+    return 1;
+}
+int ekf6_init(Ekf6 *s,const float a[3])
+{
+    Ekf6 next={0}; unsigned i;
+    next.innovation_nis=-1.0f;
+    if(!attitude_init(next.q,&next.accel_norm,a)) return 0;
+    for(i=0;i<3;++i) { next.accel_lpf[i]=a[i]; next.covariance[i][i]=0.01f; }
+    for(i=3;i<5;++i) next.covariance[i][i]=0.0001f;
+    *s=next; return 1;
+}
+int ekf6_update(Ekf6 *s,const float g[3],const float a[3],float dt)
+{
+    Ekf6 next=*s;
+    float f[5][5]={{0}},skew[3][3],angle[3],omega[3],h[3],res[3];
+    float hmat[3][5]={{0}},pht[5][3]={{0}},smat[3][3]={{0}},inv[3][3];
+    float gain[5][3]={{0}},dx[5]={0},norm,alpha,predicted_yaw,yaw_jac[3];
+    unsigned i,j,k;
+    if(!finite_float(dt) || dt<=0 || dt>MAX_SAMPLE_DT) return 0;
+    for(i=0;i<3;++i) if(!finite_float(g[i]) || !finite_float(a[i])) return 0;
+    norm=0;
+    for(i=0;i<4;++i) { if(!finite_float(s->q[i])) return 0; norm+=s->q[i]*s->q[i]; }
+    if(!finite_float(norm) || norm<1e-12f) return 0;
+    for(i=0;i<2;++i) if(!finite_float(s->bias_xy[i])) return 0;
+    for(i=0;i<5;++i) for(j=0;j<5;++j) if(!finite_float(s->covariance[i][j])) return 0;
+    norm=sqrtf(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]);
+    if(!finite_float(norm)) return 0;
+    next.accel_norm=norm; next.accel_used=0; next.innovation_nis=-1.0f;
+    for(i=0;i<3;++i) { omega[i]=g[i]-(i<2?next.bias_xy[i]:0); angle[i]=omega[i]*dt; }
+    if(!ekf_rotate(next.q,angle) || !ekf_transport_accel(next.accel_lpf,angle)) return 0;
+    predicted_yaw=ekf_yaw_rad(next.q);
+    ekf_skew(omega,skew);
+    for(i=0;i<5;++i) f[i][i]=1;
+    for(i=0;i<3;++i) for(j=0;j<3;++j) f[i][j]-=skew[i][j]*dt;
+    f[0][3]=-dt; f[1][4]=-dt;
+    ekf_cov_transform(next.covariance,f);
+    for(i=0;i<5;++i) next.covariance[i][i]+=(i<3?EKF_GYRO_NOISE:EKF_BIAS_NOISE)*dt;
+    /* Reject abnormal raw acceleration before it contaminates the LPF. */
+    if(norm<ACC_NORM_MIN || norm>ACC_NORM_MAX) goto commit;
+    alpha=dt/(EKF_ACCEL_LPF_TAU_S+dt);
+    for(i=0;i<3;++i) next.accel_lpf[i]+=alpha*(a[i]-next.accel_lpf[i]);
+    norm=sqrtf(next.accel_lpf[0]*next.accel_lpf[0]+next.accel_lpf[1]*next.accel_lpf[1]+next.accel_lpf[2]*next.accel_lpf[2]);
+    if(norm<1e-6f || !finite_float(norm)) goto commit;
+    {
+        float w=next.q[0],x=next.q[1],y=next.q[2],z=next.q[3];
+        float sinp=2*(w*y-z*x),cp2=fmaxf(0.0f,1-sinp*sinp);
+        h[0]=2*(x*z-w*y); h[1]=2*(w*x+y*z); h[2]=w*w-x*x-y*y+z*z;
+        /* Euler heading becomes singular near vertical: gyro prediction only. */
+        if(cp2<0.01f) goto commit;
+        yaw_jac[0]=0; yaw_jac[1]=h[1]/cp2; yaw_jac[2]=h[2]/cp2;
+    }
+    ekf_skew(h,skew);
+    for(i=0;i<3;++i) {
+        res[i]=next.accel_lpf[i]/norm-h[i];
+        for(j=0;j<3;++j) hmat[i][j]=skew[i][j];
+    }
+    for(i=0;i<5;++i) for(j=0;j<3;++j) for(k=0;k<5;++k)
+        pht[i][j]+=next.covariance[i][k]*hmat[j][k];
+    for(i=0;i<3;++i) for(j=0;j<3;++j) {
+        for(k=0;k<5;++k) smat[i][j]+=hmat[i][k]*pht[k][j];
+        if(i==j) smat[i][j]+=EKF_ACCEL_VARIANCE;
+    }
+    if(!ekf_inverse3(smat,inv)) return 0;
+    next.innovation_nis=0.0f;
+    for(i=0;i<3;++i) for(j=0;j<3;++j) next.innovation_nis+=res[i]*inv[i][j]*res[j];
+    if(!finite_float(next.innovation_nis)) return 0;
+    if(next.innovation_nis>EKF_CHI_SQUARE_LIMIT) goto commit;
+    for(i=0;i<5;++i) for(j=0;j<3;++j) for(k=0;k<3;++k) gain[i][j]+=pht[i][k]*inv[k][j];
+    /* Project the angle gain onto zero Euler-yaw correction. Do this BEFORE
+     * Joseph covariance update; do not pretend a gravity observation reduced
+     * uncertainty along the unobserved heading direction. yaw_jac dot h = 1. */
+    for(j=0;j<3;++j) {
+        float yaw_gain=0;
+        for(i=0;i<3;++i) yaw_gain+=yaw_jac[i]*gain[i][j];
+        for(i=0;i<3;++i) gain[i][j]-=h[i]*yaw_gain;
+    }
+    for(i=0;i<5;++i) for(j=0;j<3;++j) dx[i]+=gain[i][j]*res[j];
+    /* Joseph form retains symmetry/positive variance with finite precision. */
+    memset(f,0,sizeof(f));
+    for(i=0;i<5;++i) for(j=0;j<5;++j) {
+        f[i][j]=(i==j?1.0f:0.0f);
+        for(k=0;k<3;++k) f[i][j]-=gain[i][k]*hmat[k][j];
+    }
+    ekf_cov_transform(next.covariance,f);
+    for(i=0;i<5;++i) for(j=0;j<5;++j) for(k=0;k<3;++k)
+        next.covariance[i][j]+=EKF_ACCEL_VARIANCE*gain[i][k]*gain[j][k];
+    if(!ekf_rotate(next.q,dx)) return 0;
+    ekf_preserve_yaw(next.q,predicted_yaw);
+    for(i=0;i<2;++i) next.bias_xy[i]=attitude_clamp(next.bias_xy[i]+dx[i+3],-EKF_BIAS_LIMIT_RADPS,EKF_BIAS_LIMIT_RADPS);
+    /* Reset local error coordinates after quaternion injection. */
+    ekf_skew(dx,skew); memset(f,0,sizeof(f));
+    for(i=0;i<5;++i) f[i][i]=1;
+    for(i=0;i<3;++i) for(j=0;j<3;++j) f[i][j]-=0.5f*skew[i][j];
+    ekf_cov_transform(next.covariance,f);
+    next.accel_used=1;
+commit:
+    for(i=0;i<5;++i) for(j=i;j<5;++j) {
+        float v=0.5f*(next.covariance[i][j]+next.covariance[j][i]);
+        if(!finite_float(v) || (i==j && v<0)) return 0;
+        next.covariance[i][j]=next.covariance[j][i]=v;
+    }
+    *s=next; return 1;
+}
+void ekf6_euler(const Ekf6 *s,float e[3]) { attitude_euler(s->q,e); }
+void ekf6_cube_euler(const Ekf6 *s,float e[3]) { attitude_cube_euler(s->q,e); }

@@ -105,7 +105,13 @@ static uint32 g_last_wifi_tx_ticks, g_last_wifi_rx_ticks;
     X(dl_deadzone_rev, motor_deadzone_rev[MOTOR_WHEEL_DL]) \
     X(dr_deadzone_fwd, motor_deadzone_fwd[MOTOR_WHEEL_DR]) \
     X(dr_deadzone_rev, motor_deadzone_rev[MOTOR_WHEEL_DR]) \
-    X(control_ticks, motor.control_ticks)
+    X(control_ticks, motor.control_ticks) \
+    X(imu_dt_ms, imu_sample_dt_ms) X(imu_solve_us, imu_solve_us) \
+    X(imu_solve_max_us, imu_solve_max_us) X(imu_accel_used, imu_accel_used) \
+    X(ekf_nis, imu_ekf_nis) X(ekf_bias_x_dps, imu_ekf_bias_xy_dps[0]) \
+    X(ekf_bias_y_dps, imu_ekf_bias_xy_dps[1]) X(imu_seq, imu_sample_sequence) \
+    X(imu_method, imu_attitude_method) X(accel_norm_g, imu_accel_norm_g) \
+    X(gyro_z_integral_deg, imu_gyro_z_integral_deg)
 #define VARIABLE_ID(name, expr) TV_##name,
 enum { TELEMETRY_VARIABLES(VARIABLE_ID) TV_COUNT };
 #undef VARIABLE_ID

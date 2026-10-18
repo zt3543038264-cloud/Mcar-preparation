@@ -14,8 +14,12 @@ try {
         & $testExecutable
         if ($LASTEXITCODE -ne 0) { throw "$name failed" }
     }
-    Invoke-NavigationHostTest 'imu_navigation_mahony_test' @(
+    Invoke-NavigationHostTest 'attitude_ekf_test' @(
+        'tests/attitude_ekf_test.c', 'project/code/attitude.c')
+    Invoke-NavigationHostTest 'imu_navigation_ekf_test' @(
         'tests/imu_navigation_publish_test.c', 'project/code/imu.c', 'project/code/attitude.c')
+    Invoke-NavigationHostTest 'imu_navigation_mahony_test' @(
+        'tests/imu_navigation_publish_test.c', 'project/code/imu.c', 'project/code/attitude.c') @('-DAHRS_METHOD=1')
     Invoke-NavigationHostTest 'imu_navigation_madgwick_test' @(
         'tests/imu_navigation_publish_test.c', 'project/code/imu.c', 'project/code/attitude.c') @('-DAHRS_METHOD=2')
     Invoke-NavigationHostTest 'wifi_disabled_test' @(
@@ -27,6 +31,9 @@ try {
     Invoke-NavigationHostTest 'deadzone_menu_test' @(
         'tests/deadzone_menu_test.c', 'project/code/Mymenu.c', 'project/code/menu.c',
         'project/code/PID_config.c', 'project/code/route_follow.c')
+    Invoke-NavigationHostTest 'imu_diagnostics_telemetry_test' @(
+        'tests/imu_diagnostics_telemetry_test.c', 'project/code/wifispi.c',
+        'project/code/pid.c', 'project/code/PID_config.c')
     Invoke-NavigationHostTest 'wifi_telemetry_test' @(
         'tests/wifi_telemetry_test.c', 'project/code/wifispi.c',
         'project/code/pid.c', 'project/code/PID_config.c')

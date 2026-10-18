@@ -16,7 +16,7 @@ host_core_debug_t host_core_debug;
 uint32 system_clock=600000000u;
 static uint8 registers[128], ready=1, cs_level=1, init_result;
 static uint32 irq_disabled;
-static int16 raw_accel[3]={0,0,4096}, raw_gyro[3]={16,-16,32};
+static int16 raw_accel[3]={0,0,4096}, raw_gyro[3]={64,-64,128};
 
 uint8 imu660ra_init(void) { return init_result; }
 void gpio_set_level(gpio_pin_enum pin,uint8 level)
@@ -62,13 +62,16 @@ int main(void)
     assert(!imu_get_navigation_sample(&sample));
     imu_init();
     assert(!imu_get_navigation_sample(&sample));
+    assert(imu_sample_sequence==0 && imu_accel_used==-1 && imu_ekf_nis==-1);
+    assert(imu_gyro_z_integral_deg==0);
     calibrate();
+    assert(imu_sample_sequence==1 && fabsf(imu_sample_dt_ms-5)<0.0001f);
     assert(imu_get_navigation_sample(&first) && first.sequence==1u);
     assert(first.generation>0 && fabsf(first.dt_s-0.005f)<1e-6f);
     assert(first.accel_g[2]==1 && first.accel_g[0]==0);
     for(unsigned i=0;i<3;++i) assert(fabsf(first.gyro_dps[i])<0.0001f);
     assert(imu_gyro_dps[0]>0.9f); /* Raw sensor debug remains uncorrected. */
-    raw_gyro[2]+=164; raw_accel[0]=410;
+    raw_gyro[2]+=656; raw_accel[0]=410;
     tick();
     assert(imu_get_navigation_sample(&sample) && sample.sequence==2u);
     assert(sample.generation==first.generation);
@@ -76,14 +79,28 @@ int main(void)
     assert(sample.yaw_deg>0 && sample.yaw_deg==imu_yaw_deg);
     assert(sample.roll_deg==imu_roll_deg && sample.pitch_deg==imu_pitch_deg);
     assert(sample.accel_g[0]==imu_accel_g[0] && fabsf(sample.accel_g[0]-0.1f)<0.001f);
+    assert(imu_sample_sequence==2 && imu_accel_used==1);
+    assert(fabsf(imu_gyro_z_integral_deg-.05f)<1e-5f);
+#if AHRS_METHOD == AHRS_METHOD_EKF
+    assert(imu_ekf_nis>=0);
+#else
+    assert(imu_ekf_nis==-1);
+#endif
+    raw_accel[2]=8192; tick();
+    assert(imu_sample_sequence==3 && imu_accel_used==0 && imu_ekf_nis==-1);
+    assert(imu_solve_us>=0 && imu_solve_max_us>=imu_solve_us);
+    raw_accel[2]=4096;
     ready=0; tick();
-    assert(imu_get_navigation_sample(&sample) && sample.sequence==2u);
+    assert(imu_get_navigation_sample(&sample) && sample.sequence==3u);
+    assert(imu_sample_sequence==3);
     for(unsigned i=0;i<21;++i) tick();
     assert(imu_attitude_status==IMU_ATTITUDE_TIMEOUT);
     assert(!imu_get_navigation_sample(&sample));
-    ready=1; raw_gyro[2]=32; raw_accel[0]=0;
+    ready=1; raw_gyro[2]=128; raw_accel[0]=0;
     imu_request_recalibration(); imu_service();
     assert(!imu_get_navigation_sample(&sample));
+    assert(imu_sample_sequence==0 && imu_accel_used==-1 && imu_ekf_nis==-1);
+    assert(imu_gyro_z_integral_deg==0);
     calibrate();
     assert(imu_get_navigation_sample(&sample) && sample.sequence==1u);
     assert(sample.generation!=first.generation && fabsf(sample.yaw_deg)<0.001f);

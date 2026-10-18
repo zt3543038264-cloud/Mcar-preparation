@@ -4,16 +4,27 @@
 /* Six-axis AHRS selection, ported from rt1064_imu_vofa. */
 #define AHRS_METHOD_MAHONY       1
 #define AHRS_METHOD_MADGWICK     2
+#define AHRS_METHOD_EKF          3
 #ifndef AHRS_METHOD
-#define AHRS_METHOD              AHRS_METHOD_MAHONY
+#define AHRS_METHOD              AHRS_METHOD_EKF
 #endif
-#if AHRS_METHOD != AHRS_METHOD_MAHONY && AHRS_METHOD != AHRS_METHOD_MADGWICK
-#error AHRS_METHOD must be AHRS_METHOD_MAHONY or AHRS_METHOD_MADGWICK
+#if AHRS_METHOD != AHRS_METHOD_MAHONY && AHRS_METHOD != AHRS_METHOD_MADGWICK && AHRS_METHOD != AHRS_METHOD_EKF
+#error Invalid AHRS_METHOD
 #endif
 
 #ifndef MADGWICK_BETA
 #define MADGWICK_BETA            0.05f
 #endif
+
+/* EKF noise densities (rad^2/s, rad^2/s^3), normalized gravity variance.
+ * Gate uses normalized innovation squared, 3 DOF, 99 percent threshold.
+ * No small-gyro deadband: preserve slow real yaw motion. */
+#define EKF_GYRO_NOISE           0.0001f
+#define EKF_BIAS_NOISE           0.00000001f
+#define EKF_ACCEL_VARIANCE       0.0025f
+#define EKF_CHI_SQUARE_LIMIT     11.345f
+#define EKF_ACCEL_LPF_TAU_S      0.01f
+#define EKF_BIAS_LIMIT_RADPS     0.08726646f
 
 #define AHRS_KP                  2.0f
 #define AHRS_KI                  0.02f
